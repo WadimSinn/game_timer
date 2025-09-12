@@ -425,7 +425,11 @@ class GameTimerApp(QtWidgets.QMainWindow):
             if self.settings.get('auto_start_on_game_detect', True):
                 any_game = self.process_manager.is_any_monitored_process_running()
                 timer_running = self.timer_manager.is_running()
-                if not in_rest and any_game and not timer_running:
+                # Дополнительные условия подавления авто-старта:
+                # - таймер уже истёк (идёт grace или после него),
+                # - уже показано уведомление о конце времени.
+                suppress_auto_prompt = self.timer_manager.is_expired() or hasattr(self, 'notification_shown')
+                if not in_rest and any_game and not timer_running and not suppress_auto_prompt:
                     # Запланировать отложенный показ, если ещё не запланирован
                     if not self._auto_prompt_pending:
                         delay_sec = int(self.settings.get('auto_prompt_initial_delay_sec', 20) or 20)
@@ -477,6 +481,10 @@ class GameTimerApp(QtWidgets.QMainWindow):
             # Сброс pending независимо от результата, чтобы можно было планировать далее
             self._auto_prompt_pending = False
             # Повторная проверка условий
+            # Подавление авто-диалога во время/после истечения таймера и в период grace
+            if self.timer_manager.is_expired() or hasattr(self, 'notification_shown'):
+                self._auto_prompt_retries = 0
+                return
             if self.is_in_rest():
                 self._auto_prompt_retries = 0
                 return
@@ -514,6 +522,9 @@ class GameTimerApp(QtWidgets.QMainWindow):
         Есть защита от флапа условий в первые 3 секунды.
         """
         try:
+            # Подавление авто-диалога во время/после истечения таймера и в период grace
+            if self.timer_manager.is_expired() or hasattr(self, 'notification_shown'):
+                return
             now = time.time()
             if now < self._next_auto_prompt_ts:
                 return
@@ -866,40 +877,29 @@ class GameTimerApp(QtWidgets.QMainWindow):
             except Exception:
                 pass
             self.notification_shown = True
-            # Отмечаем, что «грайс» использован
-            self._expire_grace_used = True
-            
-            # Запускаем таймер на 10 секунд для проверки завершения игры
-            self.post_notification_timer = QtCore.QTimer(self)
-            self.post_notification_timer.timeout.connect(self._check_game_after_notification)
-            self.post_notification_timer.start(self.settings.get('notification_check_delay_ms', 10000))
+            # Запускаем единый grace-период: показываем оверлей отсчета и планируем единственную проверку
+            self._start_grace_period()
         elif not any_game_running and timer_running and is_countup:
             self.timer_manager.pause_timer()
             self.logger.info("Все игры закрыты, авто-таймер на паузе.")
 
     def _on_notification_closed(self):
-        """Callback when notification window is closed by user"""
+        """Callback when notification window is closed by user. В едином сценарии ничего не
+        пере-планируем: проверка уже назначена на момент показа уведомления."""
         try:
-            # Запланировать проверку через 10 секунд
-            delay = int(self.settings.get('notification_check_delay_ms', 10000))
-            try:
-                self.post_notification_timer.stop()
-            except Exception:
-                pass
-            self.post_notification_timer = QtCore.QTimer(self)
-            self.post_notification_timer.setSingleShot(True)
-            self.post_notification_timer.timeout.connect(self._check_game_after_notification)
-            self.post_notification_timer.start(delay)
+            pass
         except Exception as e:
             self.logger.error(f"Ошибка в _on_notification_closed: {e}")
 
     def _check_game_after_notification(self):
-        """Проверяет, завершена ли игра через 10 секунд после уведомления"""
+        """Проверяет, завершена ли игра по окончании grace-периода после уведомления"""
         try:
             any_game_running = self.process_manager.is_any_monitored_process_running()
             if any_game_running:
-                self.logger.info("Игра не завершена в течение 10 секунд после уведомления. Запускаем блокировку.")
+                self.logger.info("Игра не завершена в течение grace-периода после уведомления. Запускаем блокировку.")
                 self._hide_countdown_overlay()
+                # Отмечаем, что grace уже был использован — повторные попытки запустить игру будут блокироваться сразу
+                self._expire_grace_used = True
                 self.game_blocker.update_timer_state(True)
                 self.game_blocker.start_blocking_sequence()
                 # Ачивки: зафиксировать принудительную блокировку
@@ -912,7 +912,7 @@ class GameTimerApp(QtWidgets.QMainWindow):
                     minutes = int(self.settings.get('enforced_rest_minutes', 60) or 60)
                     self.start_rest(minutes)
             else:
-                self.logger.info("Игра завершена в течение 10 секунд после уведомления.")
+                self.logger.info("Игра завершена в течение grace-периода после уведомления.")
                 self._hide_countdown_overlay()
                 # Достижения: сделал перерыв вовремя
                 try:
@@ -926,6 +926,35 @@ class GameTimerApp(QtWidgets.QMainWindow):
                 delattr(self, 'notification_shown')
         except Exception as e:
             self.logger.error(f"Ошибка в _check_game_after_notification: {e}")
+
+    # --- Единый сценарий grace-периода после уведомления ---
+    def _start_grace_period(self):
+        try:
+            delay_ms = int(self.settings.get('notification_check_delay_ms', 10000) or 10000)
+            grace_sec = max(0, delay_ms // 1000)
+            # Показать поверх игры визуальный обратный отсчет на весь grace-период
+            self._hide_countdown_overlay()
+            self._show_countdown_overlay(grace_sec)
+            # Перепланировать одиночную проверку
+            try:
+                if hasattr(self, 'post_notification_timer') and self.post_notification_timer:
+                    self.post_notification_timer.stop()
+            except Exception:
+                pass
+            self.post_notification_timer = QtCore.QTimer(self)
+            self.post_notification_timer.setSingleShot(True)
+            self.post_notification_timer.timeout.connect(self._check_game_after_notification)
+            self.post_notification_timer.start(delay_ms)
+            # Сноузим авто-диалоги на время grace-периода
+            try:
+                self._auto_prompt_pending = False
+                self._auto_prompt_retries = 0
+                self._next_auto_prompt_ts = time.time() + grace_sec + 2
+            except Exception:
+                pass
+            self.logger.info(f"Grace-период запущен на {grace_sec} сек")
+        except Exception as e:
+            self.logger.error(f"Не удалось запустить grace-период: {e}")
 
     def check_achievements(self):
         """Проверяет ежедневные достижения при запуске."""

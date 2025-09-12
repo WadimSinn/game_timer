@@ -34,6 +34,7 @@
         "add_30_min": "ctrl+alt+shift+plus"
     },
     "block_delay": 3,
+    "notification_check_delay_ms": 60000,
     "notification_sound": true,
     "daily_limit_hours": 6,
     "start_minimized": false,
@@ -44,17 +45,98 @@
         "daily_duration": 0,
         "consecutive_days": 1,
         "hotkeys_used": [],
-        "notifications_received": 0,
-        "breaks_taken": 0,
-        "last_active_date": "2025-08-11",
-        "day_date": "2025-08-11",
-        "had_forced_block_today": false,
+        "notifications_received": 3,
+        "breaks_taken": 1,
+        "last_active_date": "2025-09-12",
+        "day_date": "2025-09-12",
+        "had_forced_block_today": true,
         "attempts_during_rest_today": 0,
         "limit_exceeded_today": false,
         "within_limit_streak": 0,
         "clean_streak": 0
     },
-    "achievements": {},
+    "achievements": {
+        "first_timer": {
+            "progress": 0,
+            "completed": false,
+            "completed_date": null
+        },
+        "time_master": {
+            "progress": 0,
+            "completed": false,
+            "completed_date": null
+        },
+        "hour_warrior": {
+            "progress": 0,
+            "completed": false,
+            "completed_date": null
+        },
+        "marathon_runner": {
+            "progress": 0,
+            "completed": false,
+            "completed_date": null
+        },
+        "daily_hero": {
+            "progress": 0,
+            "completed": false,
+            "completed_date": null
+        },
+        "weekly_master": {
+            "progress": 0,
+            "completed": false,
+            "completed_date": null
+        },
+        "night_owl": {
+            "progress": 0,
+            "completed": false,
+            "completed_date": null
+        },
+        "early_bird": {
+            "progress": 0,
+            "completed": false,
+            "completed_date": null
+        },
+        "hotkey_master": {
+            "progress": 0,
+            "completed": false,
+            "completed_date": null
+        },
+        "notification_lover": {
+            "progress": 3,
+            "completed": false,
+            "completed_date": null
+        },
+        "discipline_master": {
+            "progress": 0,
+            "completed": false,
+            "completed_date": null
+        },
+        "break_champion": {
+            "progress": 1,
+            "completed": false,
+            "completed_date": null
+        },
+        "no_violations_today": {
+            "progress": 0,
+            "completed": false,
+            "completed_date": null
+        },
+        "within_daily_limit": {
+            "progress": 0,
+            "completed": false,
+            "completed_date": null
+        },
+        "no_exceed_week": {
+            "progress": 0,
+            "completed": false,
+            "completed_date": null
+        },
+        "super_week": {
+            "progress": 0,
+            "completed": false,
+            "completed_date": null
+        }
+    },
     "rest_until": "",
     "logging": {
         "file_level": "INFO",
