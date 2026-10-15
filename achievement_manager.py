@@ -1,5 +1,6 @@
 """Менеджер достижений"""
 import json
+from copy import deepcopy
 """
 Файл: achievement_manager.py
 
@@ -28,7 +29,7 @@ class AchievementManager:
         self.logger = logging.getLogger('AchievementManager')
         
         # Загружаем сохраненные достижения
-        self.achievements: Dict[str, Achievement] = ACHIEVEMENTS.copy()
+        self.achievements: Dict[str, Achievement] = deepcopy(ACHIEVEMENTS)
         self._load_achievements()
         
         # Статистика для достижений и ежедневные флаги
@@ -86,7 +87,6 @@ class AchievementManager:
                     'completed_date': achievement.completed_date
                 }
             self.settings.set('achievements', saved_data)
-            self.settings.save()
         except Exception as e:
             self.logger.error(f"Error saving achievements: {str(e)}")
             
@@ -210,7 +210,6 @@ class AchievementManager:
             # Сериализация set
             to_save['hotkeys_used'] = list(to_save.get('hotkeys_used', set()))
             self.settings.set('achievement_stats', to_save)
-            self.settings.save()
         except Exception:
             pass
         

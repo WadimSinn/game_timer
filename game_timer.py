@@ -7,8 +7,8 @@ import logging
 import ctypes
 import time
 import typing
-from datetime import datetime, timedelta
-from PyQt5 import QtWidgets, QtCore, QtGui
+from datetime import date, datetime, timedelta
+from PyQt6 import QtWidgets, QtCore, QtGui
 from notification_window import NotificationWindow
 from countdown_overlay import CountdownOverlay
 from achievement_widgets import AchievementsWindow, AchievementCard
@@ -19,6 +19,7 @@ from process_manager import ProcessManager
 from hotkey_manager import HotkeyManager
 from activity_monitor import ActivityMonitor
 from achievement_manager import AchievementManager
+from autostart_manager import AutostartManager
 from sound_manager import SoundManager
 from tray_manager import TrayManager
 from corner_toast import CornerToast
@@ -38,6 +39,26 @@ def _acquire_single_instance_mutex():
         return mutex, True
     except Exception:
         return None, True
+
+
+class HotkeyDispatcher(QtCore.QObject):
+    """Moves global hotkey callbacks from keyboard's worker thread to Qt's UI thread."""
+
+    requested = QtCore.pyqtSignal(object)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.requested.connect(
+            self._run_callback, QtCore.Qt.ConnectionType.QueuedConnection
+        )
+
+    def dispatch(self, callback):
+        self.requested.emit(callback)
+
+    @QtCore.pyqtSlot(object)
+    def _run_callback(self, callback):
+        callback()
+
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -68,19 +89,27 @@ class GUIManager(QtWidgets.QWidget):
         self.stats_today = QtWidgets.QLabel("Сегодня сыграно: 00:00:00")
         self.stats_left = QtWidgets.QLabel("Осталось: 02:00:00")
         self.stats_week = QtWidgets.QLabel("За неделю: 00:00:00")
+        self.play_session_progress_label = QtWidgets.QLabel(
+            "До перерыва: 00:00 из 02:00"
+        )
+        self.play_session_progress_bar = QtWidgets.QProgressBar()
+        self.play_session_progress_bar.setRange(0, 1000)
+        self.play_session_progress_bar.setTextVisible(False)
         self.rest_info = QtWidgets.QLabel("")
         self.rest_info.hide()
         stats_layout.addWidget(self.stats_today)
         stats_layout.addWidget(self.stats_left)
         stats_layout.addWidget(self.stats_week)
+        stats_layout.addWidget(self.play_session_progress_label)
+        stats_layout.addWidget(self.play_session_progress_bar)
         stats_layout.addWidget(self.rest_info)
         stats_group.setLayout(stats_layout)
         main_tab_layout.addWidget(stats_group)
 
         # --- Заголовок ---
         title = QtWidgets.QLabel("Game Timer")
-        title.setFont(QtGui.QFont("Helvetica", 22, QtGui.QFont.Bold))
-        title.setAlignment(QtCore.Qt.AlignCenter)
+        title.setFont(QtGui.QFont("Helvetica", 22, QtGui.QFont.Weight.Bold))
+        title.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         main_tab_layout.addWidget(title)
 
         # --- Таймер ---
@@ -89,7 +118,7 @@ class GUIManager(QtWidgets.QWidget):
         font.setFamily("Helvetica")
         font.setPointSize(48)
         self.time_display.setFont(font)
-        self.time_display.setAlignment(QtCore.Qt.AlignCenter)
+        self.time_display.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         main_tab_layout.addWidget(self.time_display)
 
         # --- Ввод времени ---
@@ -184,7 +213,9 @@ class GUIManager(QtWidgets.QWidget):
         self.games_table = QtWidgets.QTableWidget(0, 4)
         self.games_table.setHorizontalHeaderLabels(["Игра", "Сегодня", "Неделя", "Сессий/Последний запуск"])
         self.games_table.horizontalHeader().setStretchLastSection(True)
-        self.games_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
+        self.games_table.horizontalHeader().setSectionResizeMode(
+            QtWidgets.QHeaderView.ResizeMode.Stretch
+        )
         stats_tab_layout.addWidget(self.games_table)
 
         self.btn_today.clicked.connect(lambda: self.update_per_game_stats(self.process_manager, period='today'))
@@ -200,6 +231,144 @@ class GUIManager(QtWidgets.QWidget):
         ach_tab.setWidget(ach_container)
         self.tabs.addTab(ach_tab, "Достижения")
 
+        # --- Вкладка лимитов и отдыха ---
+        limits_tab = QtWidgets.QWidget()
+        limits_layout = QtWidgets.QVBoxLayout(limits_tab)
+        limits_layout.addWidget(QtWidgets.QLabel(
+            "Время учитывается, только когда окно отслеживаемой игры активно "
+            "на переднем плане."
+        ))
+
+        daily_group = QtWidgets.QGroupBox("Дневные лимиты по дням недели")
+        daily_layout = QtWidgets.QGridLayout(daily_group)
+        daily_layout.addWidget(QtWidgets.QLabel("День"), 0, 0)
+        daily_layout.addWidget(QtWidgets.QLabel("Разрешено играть"), 0, 1)
+        self.daily_limit_spins = {}
+        weekdays = (
+            "Понедельник", "Вторник", "Среда", "Четверг",
+            "Пятница", "Суббота", "Воскресенье",
+        )
+        today_weekday = datetime.now().weekday()
+        for weekday, day_name in enumerate(weekdays):
+            label = day_name + (" (сегодня)" if weekday == today_weekday else "")
+            daily_layout.addWidget(QtWidgets.QLabel(label), weekday + 1, 0)
+            spin = QtWidgets.QDoubleSpinBox()
+            spin.setRange(0, 24)
+            spin.setSingleStep(0.25)
+            spin.setDecimals(2)
+            spin.setSuffix(" ч")
+            spin.setKeyboardTracking(False)
+            spin.setValue(self.app._daily_limit_hours_for_weekday(weekday))
+            daily_layout.addWidget(spin, weekday + 1, 1)
+            self.daily_limit_spins[weekday] = spin
+            spin.valueChanged.connect(self._save_daily_limits)
+        limits_layout.addWidget(daily_group)
+
+        cycle_group = QtWidgets.QGroupBox("Цикл игры и отдыха")
+        cycle_layout = QtWidgets.QFormLayout(cycle_group)
+        self.play_limit_enabled = QtWidgets.QCheckBox(
+            "Включить обязательные перерывы"
+        )
+        self.play_limit_enabled.setChecked(
+            bool(self.app.settings.get("enforce_play_session_limit", True))
+        )
+        self.play_limit_hours = QtWidgets.QDoubleSpinBox()
+        self.play_limit_hours.setRange(0.25, 24)
+        self.play_limit_hours.setSingleStep(0.25)
+        self.play_limit_hours.setDecimals(2)
+        self.play_limit_hours.setSuffix(" ч")
+        self.play_limit_hours.setKeyboardTracking(False)
+        self.play_limit_hours.setValue(float(
+            self.app.settings.get("play_session_limit_hours", 2) or 2
+        ))
+        self.rest_duration_minutes = QtWidgets.QSpinBox()
+        self.rest_duration_minutes.setRange(1, 1440)
+        self.rest_duration_minutes.setSuffix(" мин")
+        self.rest_duration_minutes.setValue(int(
+            self.app.settings.get("enforced_rest_minutes", 60) or 60
+        ))
+        self.cycle_summary = QtWidgets.QLabel()
+        cycle_layout.addRow(self.play_limit_enabled)
+        cycle_layout.addRow("Играть до перерыва:", self.play_limit_hours)
+        cycle_layout.addRow("Длительность перерыва:", self.rest_duration_minutes)
+        cycle_layout.addRow("Правило:", self.cycle_summary)
+        limits_layout.addWidget(cycle_group)
+
+        self.limits_save_status = QtWidgets.QLabel(
+            "Изменения сохраняются автоматически."
+        )
+        limits_layout.addWidget(self.limits_save_status)
+        limits_layout.addStretch(1)
+        self.play_limit_enabled.toggled.connect(
+            self._save_play_limit_enabled
+        )
+        self.play_limit_hours.valueChanged.connect(
+            lambda value: self._save_limit_value(
+                "play_session_limit_hours", value
+            )
+        )
+        self.rest_duration_minutes.valueChanged.connect(
+            lambda value: self._save_limit_value(
+                "enforced_rest_minutes", value
+            )
+        )
+        self.play_limit_enabled.toggled.connect(
+            self._update_cycle_summary
+        )
+        self.play_limit_hours.valueChanged.connect(
+            self._update_cycle_summary
+        )
+        self.rest_duration_minutes.valueChanged.connect(
+            self._update_cycle_summary
+        )
+        self._update_cycle_summary()
+        self._update_cycle_controls()
+        self.tabs.addTab(limits_tab, "Лимиты и отдых")
+
+    def _show_limit_save_result(self, saved):
+        if saved:
+            self.limits_save_status.setText("Настройки сохранены.")
+            self.limits_save_status.setStyleSheet("")
+        else:
+            self.limits_save_status.setText(
+                "Не удалось сохранить настройки. Проверьте доступ к файлу settings.json."
+            )
+            self.limits_save_status.setStyleSheet("color: #b00020;")
+            self.logger.error("Could not save play-limit settings")
+
+    def _save_daily_limits(self, _value=None):
+        limits = {
+            str(weekday): spin.value()
+            for weekday, spin in self.daily_limit_spins.items()
+        }
+        saved = self.app.settings.set("daily_limits_by_weekday", limits)
+        self.app.daily_limit_seconds = self.app._daily_limit_seconds_for_today()
+        self.app.update_stats()
+        self._show_limit_save_result(saved)
+
+    def _save_play_limit_enabled(self, enabled):
+        saved = self.app.settings.set("enforce_play_session_limit", enabled)
+        self._update_cycle_controls()
+        self._show_limit_save_result(saved)
+
+    def _save_limit_value(self, key, value):
+        saved = self.app.settings.set(key, value)
+        self._show_limit_save_result(saved)
+
+    def _update_cycle_controls(self, _value=None):
+        enabled = self.play_limit_enabled.isChecked()
+        self.play_limit_hours.setEnabled(enabled)
+        self.rest_duration_minutes.setEnabled(enabled)
+
+    def _update_cycle_summary(self, _value=None):
+        if self.play_limit_enabled.isChecked():
+            self.cycle_summary.setText(
+                f"{self.play_limit_hours.value():g} ч игры → "
+                f"{self.rest_duration_minutes.value()} мин отдыха"
+            )
+        else:
+            self.cycle_summary.setText("Обязательные перерывы отключены.")
+
     def set_rest_info(self, text: str, visible: bool):
         if visible:
             self.rest_info.setText(text)
@@ -211,7 +380,7 @@ class GUIManager(QtWidgets.QWidget):
     def show_my_achievements(self):
         try:
             dlg = AchievementsWindow(self.app.achievement_manager, self)
-            dlg.exec_()
+            dlg.exec()
         except Exception as e:
             self.logger.error(f"Не удалось открыть окно достижений: {e}")
 
@@ -225,7 +394,10 @@ class GUIManager(QtWidgets.QWidget):
             weekly = process_manager.get_usage_by_process_range(start_week, today + timedelta(days=1))
             meta = process_manager.get_last_seen_and_sessions(start_week, today + timedelta(days=1))
 
-            names = sorted(set(list(daily.keys()) + list(weekly.keys())))
+            names = sorted(
+                set(daily) | set(weekly)
+                | set(process_manager.get_running_monitored_processes())
+            )
             self.games_table.setRowCount(len(names))
             for row, name in enumerate(names):
                 t_day = daily.get(name, 0)
@@ -270,9 +442,21 @@ class GUIManager(QtWidgets.QWidget):
         try:
             self.apps_list.clear()
             monitored_apps = self.process_manager.get_monitored_processes()
-            active_apps = self.process_manager.get_active_processes()
+            running_apps = {
+                os.path.basename(name).lower()
+                for name in self.process_manager.get_running_monitored_processes()
+            }
+            foreground_process = (
+                self.process_manager.get_foreground_process_name() or ""
+            )
             for app_name in monitored_apps:
-                status = "запущен" if app_name.lower() in active_apps else "не запущен"
+                process_name = os.path.basename(app_name).lower()
+                if process_name == foreground_process:
+                    status = "на переднем плане"
+                elif process_name in running_apps:
+                    status = "запущена в фоне"
+                else:
+                    status = "не запущена"
                 item_text = f"{app_name} — {status}"
                 self.apps_list.addItem(item_text)
             self.app.update_stats()
@@ -301,18 +485,40 @@ class GameTimerApp(QtWidgets.QMainWindow):
         self.setMinimumSize(500, 800)
         self.app = app
         self.settings = SettingsManager()
+        self._session_limit_warning_shown = False
+        self._daily_limit_warning_date = None
+        self._active_limit_warning_text = None
+        self._parent_controls_dialog = None
+        self._play_since_rest_seconds = max(
+            0, int(self.settings.get('play_since_rest_seconds', 0) or 0)
+        )
+        self._last_session_progress_save_ts = time.monotonic()
+        self._session_progress_dirty = False
+        self.autostart_manager = AutostartManager()
+        if not self.autostart_manager.set_autostart(
+            self.settings.get('autostart', False) is True
+        ):
+            self.logger.warning("Не удалось применить настройку автозапуска")
         self.process_manager = ProcessManager(self.settings)
+        self._last_usage_account_ts = time.monotonic()
         self.sound_manager = SoundManager(self.settings)
         self.gui_manager = GUIManager(self)
         self.setCentralWidget(self.gui_manager)
-        self.game_blocker = GameBlocker(self.settings)
+        self.game_blocker = GameBlocker(
+            self.settings, self.process_manager.close_monitored_game_windows
+        )
         self.timer_manager = TimerManager(self, self.game_blocker, self.gui_manager, self.settings)
         self.hotkey_manager = HotkeyManager()
+        self.hotkey_dispatcher = HotkeyDispatcher(self)
         # Менеджер системного трея (иконка и меню)
         self.tray_manager = TrayManager(self)
         self.activity_monitor = ActivityMonitor(self.settings)
         self.achievement_manager = AchievementManager(self.settings, notification_callback=self.tray_manager.show_message)
-        self.daily_limit_seconds = self.settings.get('daily_limit_hours', 2) * 3600
+        self.daily_limit_seconds = int(self.settings.get(
+            'daily_limit_seconds',
+            self.settings.get('daily_limit_hours', 2) * 3600
+        ))
+        self.daily_limit_seconds = self._daily_limit_seconds_for_today()
         self.timestamp = time.time()
         # Оверлей обратного отсчета (не мешает кликам)
         self.countdown_overlay = CountdownOverlay()
@@ -344,9 +550,7 @@ class GameTimerApp(QtWidgets.QMainWindow):
         self.periodic_timer.timeout.connect(self.run_periodic_tasks)
         self.periodic_timer.start(self.settings.get('periodic_tasks_interval_ms', 1000))
 
-        self.passive_logging_timer = QtCore.QTimer(self)
-        self.passive_logging_timer.timeout.connect(self.log_passive_usage)
-        self.passive_logging_timer.start(self.settings.get('passive_logging_interval_ms', 60000))
+        self.app.aboutToQuit.connect(self._shutdown)
 
         # Анти-спам авто-приглашения к запуску таймера
         self._next_auto_prompt_ts = 0.0
@@ -359,6 +563,7 @@ class GameTimerApp(QtWidgets.QMainWindow):
         # Текущее окно авто-спроса
         self._auto_prompt_box = None
         self._auto_prompt_open = False
+        self._block_dismissed_until_game_exit = False
 
     def setup_connections(self):
         self._init_hotkeys()
@@ -366,12 +571,18 @@ class GameTimerApp(QtWidgets.QMainWindow):
         try:
             # ВАЖНО: keyboard вызывает коллбеки в фоновой нити.
             # Все UI-операции перенаправляем в главный поток через singleShot.
-            self.hotkey_manager.add_hotkey('ctrl+alt+shift+r', lambda: QtCore.QTimer.singleShot(0, self.reset_all_data))
+            self.hotkey_manager.add_hotkey(
+                'ctrl+alt+shift+r',
+                lambda: self.hotkey_dispatcher.dispatch(self.reset_all_data)
+            )
             self.logger.info("Registered reset-all hotkey: Ctrl+Alt+Shift+R")
         except Exception as e:
             self.logger.error(f"Не удалось зарегистрировать хоткей сброса: {e}")
 
     def run_periodic_tasks(self):
+        self._account_active_usage()
+        self.update_play_session_progress()
+        self.daily_limit_seconds = self._daily_limit_seconds_for_today()
         # 1) Проверка активности
         self.check_activity()
         # 2) Обслуживание перерыва
@@ -398,6 +609,11 @@ class GameTimerApp(QtWidgets.QMainWindow):
                             pass
         except Exception as e:
             self.logger.error(f"Ошибка проверки дневного лимита: {e}")
+        try:
+            today_used = self.process_manager.get_daily_usage()
+            self._check_limit_warnings(today_used)
+        except Exception as e:
+            self.logger.error(f"Ошибка проверки предупреждений лимитов: {e}")
         # 4) Если во время перерыва запущены игры — немедленная блокировка + уведомление
         try:
             if in_rest and self.process_manager.is_any_monitored_process_running():
@@ -407,8 +623,9 @@ class GameTimerApp(QtWidgets.QMainWindow):
                     self.achievement_manager.on_attempt_during_rest()
                 except Exception:
                     pass
-                self.game_blocker.update_timer_state(True)
-                self.game_blocker.start_blocking_sequence()
+                if not self._block_dismissed_until_game_exit:
+                    self.game_blocker.update_timer_state(True)
+                    self.game_blocker.start_blocking_sequence()
         except Exception as e:
             self.logger.error(f"Ошибка блокировки во время перерыва: {e}")
         # 4.1) Обновить индикатор перерыва в UI
@@ -444,6 +661,10 @@ class GameTimerApp(QtWidgets.QMainWindow):
 
         # 6) Обычный мониторинг авто-таймера и достижения
         self._autocountup_monitor()
+        if self.timer_manager.is_running() and not self.timer_manager.is_paused():
+            self.achievement_manager.on_timer_tick(
+                self.timer_manager.get_elapsed_time()
+            )
         self.check_achievements()
         # 7) Обновление плашки обратного отсчета до конца
         self._update_pre_expiry_toast()
@@ -454,15 +675,29 @@ class GameTimerApp(QtWidgets.QMainWindow):
             if self.is_in_rest():
                 self._notify_rest()
                 return
+            if self._active_limit_warning_text:
+                self.pre_expiry_toast.show_text(
+                    self._active_limit_warning_text
+                )
+                return
             mode_text = self.gui_manager.mode.currentText()
             mode = 'countdown' if 'Обратный' in mode_text else 'countup'
             if mode == 'countdown':
                 h = int(self.gui_manager.hours.text() or 0)
                 m = int(self.gui_manager.minutes.text() or 0)
                 s = int(self.gui_manager.seconds.text() or 0)
-                self.timer_manager.start_timer(h * 3600 + m * 60 + s, mode)
+                started = self.timer_manager.start_timer(
+                    h * 3600 + m * 60 + s, mode
+                )
+                if not started:
+                    QtWidgets.QMessageBox.information(
+                        self, "Таймер", "Укажи время больше нуля."
+                    )
+                    return
             else:
-                self.timer_manager.start_timer(0, mode)
+                if not self.timer_manager.start_timer(0, mode):
+                    return
+            self.achievement_manager.on_timer_start()
             # Установка флага ручного запуска
             # Сброс показать-один-раз уведомления и таймера проверки, если были
             if hasattr(self, 'post_notification_timer'):
@@ -472,6 +707,7 @@ class GameTimerApp(QtWidgets.QMainWindow):
             self.manual_start = True
             # Новый запуск таймера — сбрасываем флаг грайса
             self._expire_grace_used = False
+            self._block_dismissed_until_game_exit = False
         except Exception as e:
             self.logger.error(f"Ошибка авто-приглашения к запуску таймера: {e}")
 
@@ -549,19 +785,19 @@ class GameTimerApp(QtWidgets.QMainWindow):
             self._auto_prompt_open = True
             box.setWindowTitle('⏱️ Таймер')
             box.setText(f"🎮 {text}")
-            box.setIcon(QtWidgets.QMessageBox.Question)
-            box.setStandardButtons(QtWidgets.QMessageBox.NoButton)
-            yes_btn = box.addButton(QtWidgets.QMessageBox.Yes)
-            no_btn = box.addButton(QtWidgets.QMessageBox.No)
+            box.setIcon(QtWidgets.QMessageBox.Icon.Question)
+            box.setStandardButtons(QtWidgets.QMessageBox.StandardButton.NoButton)
+            yes_btn = box.addButton(QtWidgets.QMessageBox.StandardButton.Yes)
+            no_btn = box.addButton(QtWidgets.QMessageBox.StandardButton.No)
             try:
                 yes_btn.setText('Да, начать! 🚀')
                 no_btn.setText('Нет, позже')
             except Exception:
                 pass
             box.setDefaultButton(yes_btn)
-            box.setWindowFlag(QtCore.Qt.WindowStaysOnTopHint, True)
-            box.setWindowFlag(QtCore.Qt.Tool, True)
-            box.setWindowModality(QtCore.Qt.NonModal)
+            box.setWindowFlag(QtCore.Qt.WindowType.WindowStaysOnTopHint, True)
+            box.setWindowFlag(QtCore.Qt.WindowType.Tool, True)
+            box.setWindowModality(QtCore.Qt.WindowModality.NonModal)
             # Крупный шрифт и удобные кнопки
             try:
                 box.setStyleSheet(
@@ -588,11 +824,19 @@ class GameTimerApp(QtWidgets.QMainWindow):
                     if mode == 'countdown':
                         secs = int(self.settings.get('auto_countdown_seconds', 3600) or 3600)
                         secs = max(0, secs)
-                        self.timer_manager.start_timer(secs, 'countdown')
+                        started = self.timer_manager.start_timer(secs, 'countdown')
                     else:
-                        self.timer_manager.start_timer(0, 'countup')
-                    self.manual_start = True
+                        started = self.timer_manager.start_timer(0, 'countup')
+                    if not started:
+                        self.tray_manager.show_message(
+                            "Таймер",
+                            "Автоматическая длительность должна быть больше нуля."
+                        )
+                        return
+                    self.achievement_manager.on_timer_start()
+                    self.manual_start = False
                     self._expire_grace_used = False
+                    self._block_dismissed_until_game_exit = False
                     self._auto_prompt_retries = 0
                     self.logger.info("Auto-prompt: clicked YES -> timer started")
                 finally:
@@ -707,6 +951,11 @@ class GameTimerApp(QtWidgets.QMainWindow):
             if self.is_in_rest():
                 self.pre_expiry_toast.hide_toast()
                 return
+            if self._active_limit_warning_text:
+                self.pre_expiry_toast.show_text(
+                    self._active_limit_warning_text
+                )
+                return
             if not self.timer_manager.is_running():
                 self.pre_expiry_toast.hide_toast()
                 return
@@ -736,6 +985,7 @@ class GameTimerApp(QtWidgets.QMainWindow):
         self.manual_start = False
         # Сброс грайса
         self._expire_grace_used = False
+        self._block_dismissed_until_game_exit = False
         # Остановка таймера проверки после уведомления и сброс метки показа уведомления
         if hasattr(self, 'post_notification_timer'):
             self.post_notification_timer.stop()
@@ -747,15 +997,18 @@ class GameTimerApp(QtWidgets.QMainWindow):
         try:
             # Подтверждение
             box = QtWidgets.QMessageBox(self)
-            box.setIcon(QtWidgets.QMessageBox.Warning)
+            box.setIcon(QtWidgets.QMessageBox.Icon.Warning)
             box.setWindowTitle('Сброс данных')
             box.setText('Сбросить статистику, достижения и таймер? Это действие нельзя отменить.')
-            box.setStandardButtons(QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No)
-            box.setDefaultButton(QtWidgets.QMessageBox.No)
-            box.setWindowFlag(QtCore.Qt.WindowStaysOnTopHint, True)
-            box.setWindowModality(QtCore.Qt.ApplicationModal)
+            box.setStandardButtons(
+                QtWidgets.QMessageBox.StandardButton.Yes
+                | QtWidgets.QMessageBox.StandardButton.No
+            )
+            box.setDefaultButton(QtWidgets.QMessageBox.StandardButton.No)
+            box.setWindowFlag(QtCore.Qt.WindowType.WindowStaysOnTopHint, True)
+            box.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
             box.activateWindow(); box.raise_()
-            if box.exec_() != QtWidgets.QMessageBox.Yes:
+            if box.exec() != QtWidgets.QMessageBox.StandardButton.Yes:
                 return
 
             # 1) Остановить и сбросить таймер/флаги
@@ -764,6 +1017,7 @@ class GameTimerApp(QtWidgets.QMainWindow):
             except Exception:
                 pass
             self.reset_timer()
+            self._reset_play_since_rest()
             self._next_auto_prompt_ts = 0.0
             self._expire_grace_used = False
             self.rest_reason = None
@@ -777,11 +1031,7 @@ class GameTimerApp(QtWidgets.QMainWindow):
 
             # 3) Удалить БД статистики использования
             try:
-                db_path = getattr(self.process_manager, '_usage_db', 'usage_stats.db')
-                if db_path and os.path.exists(db_path):
-                    os.remove(db_path)
-                # Переинициализировать БД
-                self.process_manager._init_db()
+                self.process_manager.reset_usage_data()
             except Exception as e:
                 self.logger.error(f"Ошибка удаления БД статистики: {e}")
 
@@ -836,19 +1086,58 @@ class GameTimerApp(QtWidgets.QMainWindow):
                 h = int(self.gui_manager.hours.text() or 0)
                 m = int(self.gui_manager.minutes.text() or 0)
                 s = int(self.gui_manager.seconds.text() or 0)
-                self.timer_manager.start_timer(h * 3600 + m * 60 + s, mode)
+                if not self.timer_manager.start_timer(
+                    h * 3600 + m * 60 + s, mode
+                ):
+                    return
+                self.achievement_manager.on_timer_start()
+                self._block_dismissed_until_game_exit = False
                 self.logger.info(f"Игра запущена, таймер запущен в режиме countdown на {h:02d}:{m:02d}:{s:02d}.")
             else:
-                self.timer_manager.start_timer(0, mode)
+                if not self.timer_manager.start_timer(0, mode):
+                    return
+                self.achievement_manager.on_timer_start()
+                self._block_dismissed_until_game_exit = False
                 self.logger.info("Игра запущена, таймер запущен в режиме countup.")
         except Exception as e:
             self.logger.error(f"Ошибка при запуске таймера из UI: {e}")
 
     def _autocountup_monitor(self):
         """Мониторинг процессов для авто-таймера"""
-        any_game_running = self.process_manager.is_any_monitored_process_running()
+        block_screen = getattr(
+            getattr(self, 'game_blocker', None), 'block_screen', None
+        )
+        warning_active = (
+            hasattr(self, 'notification_shown')
+            or (
+                hasattr(self, 'post_notification_timer')
+                and self.post_notification_timer.isActive()
+            )
+            or (block_screen is not None and block_screen.isVisible())
+        )
+        any_game_running = self.process_manager.is_any_monitored_process_running(
+            force_refresh=warning_active
+        )
         timer_running = self.timer_manager.is_running()
         is_countup = self.timer_manager.get_mode() == 'countup'
+
+        if not any_game_running:
+            self._cancel_game_warning()
+            if self.game_blocker.unblock():
+                self.logger.info("Игра закрыта — окно блокировки снято.")
+            self._block_dismissed_until_game_exit = False
+            self._expire_grace_used = False
+            if (
+                timer_running
+                and is_countup
+                and not self.manual_start
+            ):
+                self.timer_manager.pause_timer()
+                self.logger.info("Все игры закрыты, авто-таймер на паузе.")
+            return
+
+        if self._block_dismissed_until_game_exit:
+            return
         
         # Проверяем, не истек ли таймер
         timer_expired = self.timer_manager.is_expired()
@@ -879,9 +1168,17 @@ class GameTimerApp(QtWidgets.QMainWindow):
             self.notification_shown = True
             # Запускаем единый grace-период: показываем оверлей отсчета и планируем единственную проверку
             self._start_grace_period()
-        elif not any_game_running and timer_running and is_countup:
-            self.timer_manager.pause_timer()
-            self.logger.info("Все игры закрыты, авто-таймер на паузе.")
+    def _cancel_game_warning(self):
+        """Stops the grace countdown and notification once all monitored games exit."""
+        timer = getattr(self, 'post_notification_timer', None)
+        if timer is not None and timer.isActive():
+            timer.stop()
+        if hasattr(self, 'notification_shown'):
+            delattr(self, 'notification_shown')
+        notification = getattr(self, 'notification_window', None)
+        if notification is not None and notification.isVisible():
+            notification.accept()
+        self._hide_countdown_overlay()
 
     def _on_notification_closed(self):
         """Callback when notification window is closed by user. В едином сценарии ничего не
@@ -894,7 +1191,11 @@ class GameTimerApp(QtWidgets.QMainWindow):
     def _check_game_after_notification(self):
         """Проверяет, завершена ли игра по окончании grace-периода после уведомления"""
         try:
-            any_game_running = self.process_manager.is_any_monitored_process_running()
+            any_game_running = (
+                self.process_manager.is_any_monitored_process_running(
+                    force_refresh=True
+                )
+            )
             if any_game_running:
                 self.logger.info("Игра не завершена в течение grace-периода после уведомления. Запускаем блокировку.")
                 self._hide_countdown_overlay()
@@ -959,6 +1260,7 @@ class GameTimerApp(QtWidgets.QMainWindow):
     def check_achievements(self):
         """Проверяет ежедневные достижения при запуске."""
         self.achievement_manager.on_daily_check()
+        self.achievement_manager.check_time_achievements()
         try:
             self.gui_manager.refresh_achievements(self.achievement_manager)
         except Exception:
@@ -983,6 +1285,9 @@ class GameTimerApp(QtWidgets.QMainWindow):
             minutes = int(minutes or 0)
             if minutes <= 0:
                 return
+            self._session_limit_warning_shown = False
+            self._active_limit_warning_text = None
+            self._reset_play_since_rest()
             self._set_rest_until(datetime.now() + timedelta(minutes=minutes))
             self.rest_reason = 'cooldown'
             self._notify_rest(initial=True)
@@ -991,6 +1296,9 @@ class GameTimerApp(QtWidgets.QMainWindow):
 
     def start_rest_until(self, until_dt: datetime):
         try:
+            self._session_limit_warning_shown = False
+            self._active_limit_warning_text = None
+            self._reset_play_since_rest()
             self._set_rest_until(until_dt)
             self._notify_rest(initial=True)
         except Exception as e:
@@ -1043,28 +1351,301 @@ class GameTimerApp(QtWidgets.QMainWindow):
         except Exception:
             pass
 
-    def log_passive_usage(self):
-        """Пассивный учет времени: каждые N секунд добавляем время для запущенных игр,
-        если пользователь не запускал таймер вручную."""
+    def _account_active_usage(self):
+        """Accounts time only while a monitored game's window is in the foreground."""
         try:
-            if getattr(self, 'manual_start', False):
+            now = time.monotonic()
+            elapsed = now - self._last_usage_account_ts
+            self._last_usage_account_ts = now
+            max_interval = max(
+                1,
+                int(self.settings.get('periodic_tasks_interval_ms', 1000) / 1000)
+            )
+            duration = min(max_interval, int(elapsed))
+            if duration <= 0:
                 return
-            # Проверяем, запущены ли отслеживаемые процессы
             active = set(self.process_manager.get_active_processes())
-            monitored = set((p or '').strip().lower() for p in (self.process_manager.get_monitored_processes() or []))
-            if not active or not monitored:
+            monitored = {
+                os.path.basename(name.strip()).lower()
+                for name in (self.process_manager.get_monitored_processes() or [])
+                if isinstance(name, str) and name.strip()
+            }
+            foreground = (
+                self.process_manager.get_foreground_process_name() or ""
+            )
+            foreground = os.path.basename(foreground).lower()
+            if foreground not in active or foreground not in monitored:
                 return
-            running_tracked = active & monitored
-            if not running_tracked:
-                return
-            interval_sec = max(60, int(self.settings.get('passive_logging_interval_ms', 600000) / 1000))
-            for proc_name in running_tracked:
-                self.process_manager.log_usage(proc_name, interval_sec)
-            self.logger.debug(f"Пассивно залогировано {interval_sec} сек для: {', '.join(sorted(running_tracked))}")
-            # Обновим статистику на экране
-            self.update_stats()
+            self.process_manager.record_active_processes({foreground}, duration)
+            self._account_play_session({foreground}, duration)
         except Exception as e:
-            self.logger.error(f"Ошибка пассивного учёта времени: {e}")
+            self.logger.error(f"Ошибка учёта времени активных игр: {e}")
+
+    def _daily_limit_hours_for_weekday(self, weekday):
+        limits = self.settings.get('daily_limits_by_weekday', {})
+        if isinstance(limits, dict):
+            value = limits.get(str(weekday), limits.get(weekday))
+            if value is not None:
+                try:
+                    return min(24.0, max(0.0, float(value)))
+                except (TypeError, ValueError):
+                    self.logger.warning(
+                        f"Некорректный дневной лимит для дня недели {weekday}"
+                    )
+        legacy_seconds = self.settings.get('daily_limit_seconds')
+        try:
+            if legacy_seconds is not None:
+                return min(24.0, max(0.0, float(legacy_seconds) / 3600))
+            legacy_hours = self.settings.get('daily_limit_hours', 6)
+            return min(24.0, max(0.0, float(legacy_hours)))
+        except (TypeError, ValueError):
+            self.logger.warning("Некорректный общий дневной лимит; используется 6 часов")
+            return 6.0
+
+    def _daily_limit_seconds_for_today(self):
+        return int(round(
+            self._daily_limit_hours_for_weekday(datetime.now().weekday()) * 3600
+        )) + self._parent_extension_seconds_today("daily_seconds")
+
+    def _parent_extension_seconds_today(self, field="daily_seconds"):
+        extension = self.settings.get('parent_extension', {})
+        today = date.today().isoformat()
+        if not isinstance(extension, dict) or extension.get('date') != today:
+            return 0
+        try:
+            return max(0, int(extension.get(field, 0)))
+        except (TypeError, ValueError):
+            self.logger.warning("Некорректное значение родительского продления")
+            return 0
+
+    def _check_limit_warnings(self, today_used):
+        try:
+            warning_seconds = max(
+                0, int(self.settings.get('limit_warning_seconds', 300) or 0)
+            )
+            if warning_seconds <= 0:
+                return
+
+            if self.settings.get('enforce_play_session_limit', True):
+                session_limit = (
+                    int(float(self.settings.get('play_session_limit_hours', 2) or 0) * 3600)
+                    + self._parent_extension_seconds_today("session_seconds")
+                )
+                session_remaining = session_limit - self._play_since_rest_seconds
+                if (
+                    0 < session_remaining <= warning_seconds
+                    and not self._session_limit_warning_shown
+                ):
+                    minutes_left = max(1, (session_remaining + 59) // 60)
+                    warning_text = (
+                        f"Перерыв начнётся примерно через {minutes_left} мин. "
+                        "Сохрани игру."
+                    )
+                    self.tray_manager.show_message(
+                        "Скоро перерыв",
+                        warning_text,
+                        QtWidgets.QSystemTrayIcon.MessageIcon.Warning,
+                        10000,
+                    )
+                    self._active_limit_warning_text = warning_text
+                    self._session_limit_warning_shown = True
+
+            today_key = date.today().isoformat()
+            daily_remaining = self.daily_limit_seconds - int(today_used)
+            if (
+                self.settings.get('block_until_next_day_on_limit', True)
+                and 0 < daily_remaining <= warning_seconds
+                and self._daily_limit_warning_date != today_key
+            ):
+                minutes_left = max(1, (daily_remaining + 59) // 60)
+                warning_text = (
+                    f"Дневной лимит закончится примерно через {minutes_left} мин. "
+                    "Сохрани игру."
+                )
+                self.tray_manager.show_message(
+                    "Скоро дневной лимит",
+                    warning_text,
+                    QtWidgets.QSystemTrayIcon.MessageIcon.Warning,
+                    10000,
+                )
+                self._active_limit_warning_text = warning_text
+                self._daily_limit_warning_date = today_key
+        except Exception as e:
+            self.logger.error(f"Ошибка проверки предупреждений лимитов: {e}")
+
+    def grant_parent_extension(self, minutes):
+        minutes = int(minutes)
+        if minutes not in {15, 30, 60}:
+            self.logger.error(f"Недопустимая длительность продления: {minutes}")
+            return False
+
+        today = date.today().isoformat()
+        previous_extension = self.settings.get('parent_extension', {})
+        current_daily_seconds = self._parent_extension_seconds_today("daily_seconds")
+        current_session_seconds = self._parent_extension_seconds_today("session_seconds")
+        updated = {
+            "date": today,
+            "daily_seconds": current_daily_seconds + minutes * 60,
+            "session_seconds": current_session_seconds + minutes * 60,
+        }
+        if not self.settings.set('parent_extension', updated):
+            self.logger.error("Не удалось сохранить родительское продление")
+            return False
+
+        self.daily_limit_seconds = self._daily_limit_seconds_for_today()
+        if self.is_in_rest():
+            if not self.settings.set('rest_until', ''):
+                if not self.settings.set('parent_extension', previous_extension):
+                    self.logger.error(
+                        "Не удалось откатить продление после ошибки сохранения rest_until"
+                    )
+                self.logger.error("Не удалось снять сохранённый перерыв")
+                return False
+            self.rest_until = None
+            self.rest_reason = None
+        if hasattr(self, 'game_blocker'):
+            self.game_blocker.unblock()
+        self._block_dismissed_until_game_exit = False
+        if hasattr(self, 'timer_manager') and self.timer_manager.is_expired():
+            self.timer_manager.reset_timer()
+        self._session_limit_warning_shown = False
+        self._active_limit_warning_text = None
+        self.update_stats()
+        self.tray_manager.show_message(
+            "Родительское продление",
+            f"Добавлено {minutes} минут игрового времени на сегодня.",
+            QtWidgets.QSystemTrayIcon.MessageIcon.Information,
+            8000,
+        )
+        self.logger.info(
+            f"Родитель добавил {minutes} минут игрового времени на {today}"
+        )
+        return True
+
+    def show_parent_controls(self):
+        if self._parent_controls_dialog is not None:
+            self._parent_controls_dialog.raise_()
+            self._parent_controls_dialog.activateWindow()
+            return
+
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Родительское управление")
+        dialog.setWindowFlag(QtCore.Qt.WindowType.WindowStaysOnTopHint, True)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        layout.addWidget(QtWidgets.QLabel(
+            "Разовое продление действует только до конца сегодняшнего дня "
+            "и не меняет обычное расписание."
+        ))
+
+        for minutes in (15, 30, 60):
+            button = QtWidgets.QPushButton(f"Продлить на {minutes} минут")
+            button.clicked.connect(
+                lambda _checked=False, amount=minutes: self._apply_parent_extension(
+                    dialog, amount
+                )
+            )
+            layout.addWidget(button)
+
+        blocker = getattr(self, 'game_blocker', None)
+        screen = getattr(blocker, 'block_screen', None)
+        if screen is not None and screen.isVisible():
+            dismiss_button = QtWidgets.QPushButton(
+                "Снять текущую блокировку до закрытия игры"
+            )
+            dismiss_button.clicked.connect(
+                lambda: self._dismiss_current_block(dialog)
+            )
+            layout.addWidget(dismiss_button)
+
+        close_button = QtWidgets.QPushButton("Закрыть")
+        close_button.clicked.connect(dialog.close)
+        layout.addWidget(close_button)
+        dialog.finished.connect(
+            lambda: setattr(self, '_parent_controls_dialog', None)
+        )
+        self._parent_controls_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _apply_parent_extension(self, dialog, minutes):
+        if self.grant_parent_extension(minutes):
+            dialog.close()
+
+    def _dismiss_current_block(self, dialog):
+        self._unblock_and_suppress_until_game_exit()
+        dialog.close()
+
+    def _account_play_session(self, running_processes, duration):
+        if (
+            not self.settings.get('enforce_play_session_limit', True)
+            or not running_processes
+            or duration <= 0
+            or self.is_in_rest()
+        ):
+            return
+
+        limit_hours = float(self.settings.get('play_session_limit_hours', 2) or 0)
+        limit_seconds = (
+            int(limit_hours * 3600)
+            + self._parent_extension_seconds_today("session_seconds")
+        )
+        if limit_seconds <= 0:
+            return
+
+        self._play_since_rest_seconds += duration
+        self._session_progress_dirty = True
+        if self._play_since_rest_seconds >= limit_seconds:
+            minutes = max(
+                1,
+                int(self.settings.get('enforced_rest_minutes', 60) or 60),
+            )
+            self.logger.info(
+                f"Игровой лимит {limit_hours:g} ч достигнут; "
+                f"начинается перерыв на {minutes} мин."
+            )
+            self.start_rest(minutes)
+            return
+
+        if time.monotonic() - self._last_session_progress_save_ts >= 60:
+            self._persist_play_since_rest()
+
+    def _persist_play_since_rest(self):
+        if not self._session_progress_dirty:
+            return
+        if not self.settings.set(
+            'play_since_rest_seconds', self._play_since_rest_seconds
+        ):
+            self.logger.error("Не удалось сохранить время игры после перерыва")
+            return
+        self._session_progress_dirty = False
+        self._last_session_progress_save_ts = time.monotonic()
+
+    def _reset_play_since_rest(self):
+        self._play_since_rest_seconds = 0
+        self._session_progress_dirty = True
+        self._persist_play_since_rest()
+        extension = self.settings.get('parent_extension', {})
+        if (
+            isinstance(extension, dict)
+            and extension.get('date') == date.today().isoformat()
+            and extension.get('session_seconds', 0)
+        ):
+            extension = dict(extension)
+            extension['session_seconds'] = 0
+            if not self.settings.set('parent_extension', extension):
+                self.logger.error(
+                    "Не удалось очистить продление текущего цикла игры"
+                )
+
+    def _shutdown(self):
+        """Flushes pending usage records and unregisters global hotkeys."""
+        try:
+            self.hotkey_manager.stop()
+            self._persist_play_since_rest()
+            self.process_manager.flush_pending_usage()
+        except Exception as e:
+            self.logger.error(f"Ошибка завершения приложения: {e}")
 
     # --- Overlay helpers ---
     def _show_countdown_overlay(self, seconds: int):
@@ -1087,36 +1668,89 @@ class GameTimerApp(QtWidgets.QMainWindow):
         try:
             today = self.process_manager.get_daily_usage()
             week = self.process_manager.get_weekly_usage()
+            self.daily_limit_seconds = self._daily_limit_seconds_for_today()
             left = max(0, self.daily_limit_seconds - today)
-            self.gui_manager.stats_today.setText(f"Сегодня: {today//3600:02d}:{(today%3600)//60:02d}:{today%60:02d}")
+            limit = self.daily_limit_seconds
+            self.gui_manager.stats_today.setText(
+                f"Сегодня: {today//3600:02d}:{(today%3600)//60:02d}:{today%60:02d} "
+                f"/ лимит {limit//3600:02d}:{(limit%3600)//60:02d}"
+            )
             self.gui_manager.stats_left.setText(f"Осталось: {left//3600:02d}:{(left%3600)//60:02d}:{left%60:02d}")
             self.gui_manager.stats_week.setText(f"За неделю: {week//3600:02d}:{(week%3600)//60:02d}:{week%60:02d}")
+            self.update_play_session_progress()
             # Обновить пер-игровую таблицу и достижения
             self.gui_manager.update_per_game_stats(self.process_manager, period='today')
             self.gui_manager.refresh_achievements(self.achievement_manager)
         except Exception as e:
             self.logger.error(f"Ошибка обновления статистики: {e}")
 
+    def update_play_session_progress(self):
+        label = self.gui_manager.play_session_progress_label
+        bar = self.gui_manager.play_session_progress_bar
+        if not self.settings.get('enforce_play_session_limit', True):
+            label.setText("Обязательные перерывы отключены")
+            bar.setValue(0)
+            return
+
+        limit_seconds = int(
+            float(self.settings.get('play_session_limit_hours', 2) or 0) * 3600
+        )
+        if limit_seconds <= 0:
+            label.setText("Лимит до перерыва должен быть больше нуля")
+            bar.setValue(0)
+            return
+
+        if self.is_in_rest():
+            label.setText(f"Перерыв: осталось {self.rest_remaining_str()}")
+            bar.setValue(1000)
+            return
+
+        played = min(self._play_since_rest_seconds, limit_seconds)
+        bar.setValue(int(played * 1000 / limit_seconds))
+        label.setText(
+            f"До перерыва: {self._format_duration(played)} из "
+            f"{self._format_duration(limit_seconds)}"
+        )
+
+    @staticmethod
+    def _format_duration(total_seconds):
+        total_minutes = max(0, int(total_seconds)) // 60
+        hours, minutes = divmod(total_minutes, 60)
+        if hours:
+            return f"{hours} ч {minutes:02d} мин"
+        return f"{minutes} мин"
+
     def _init_hotkeys(self):
+        dispatch = self.hotkey_dispatcher.dispatch
         # Встроенные хоткеи изменения лимита и разблокировки (оставляем)
-        self.hotkey_manager.register_limit_hotkeys(self.increase_daily_limit, self.decrease_daily_limit)
-        self.hotkey_manager.register_blocker_hotkey(self.game_blocker.unblock)
+        self.hotkey_manager.register_limit_hotkeys(
+            lambda: dispatch(self.increase_daily_limit),
+            lambda: dispatch(self.decrease_daily_limit)
+        )
+        self.hotkey_manager.register_blocker_hotkey(
+            lambda: dispatch(self.show_parent_controls)
+        )
 
         # Регистрация хоткеев из настроек
         self.hotkey_manager.register_from_settings(
             self.settings,
             callbacks={
-                "start": self.start_timer,
-                "pause_resume": self.pause_resume,
-                "reset": self.reset_timer,
-                "add_5_min": self.add_5_minutes,
-                "add_30_min": self.add_30_minutes,
+                "start": lambda: dispatch(self.start_timer),
+                "pause_resume": lambda: dispatch(self.pause_resume),
+                "reset": lambda: dispatch(self.reset_timer),
+                "add_5_min": lambda: dispatch(self.add_5_minutes),
+                "add_30_min": lambda: dispatch(self.add_30_minutes),
             }
         )
 
     def pause_resume(self):
         """Тоггл паузы/продолжения для хоткея."""
         self.timer_manager.toggle_pause()
+
+    def _unblock_and_suppress_until_game_exit(self):
+        """Unblocks once and avoids immediately reopening while the same game remains."""
+        if self.game_blocker.unblock():
+            self._block_dismissed_until_game_exit = True
 
     def add_5_minutes(self):
         """Быстро добавляет +5 минут к таймеру (если запущен)."""
@@ -1126,8 +1760,31 @@ class GameTimerApp(QtWidgets.QMainWindow):
         """Быстро добавляет +30 минут к таймеру (если запущен)."""
         self.timer_manager.add_minutes(30)
 
-    def increase_daily_limit(self): self.daily_limit_seconds += 600; self.update_stats()
-    def decrease_daily_limit(self): self.daily_limit_seconds = max(0, self.daily_limit_seconds - 600); self.update_stats()
+    def increase_daily_limit(self):
+        self._adjust_today_daily_limit(600)
+
+    def decrease_daily_limit(self):
+        self._adjust_today_daily_limit(-600)
+
+    def _adjust_today_daily_limit(self, delta_seconds):
+        weekday = datetime.now().weekday()
+        limits = self.settings.get('daily_limits_by_weekday', {})
+        limits = dict(limits) if isinstance(limits, dict) else {}
+        hours = self._daily_limit_hours_for_weekday(weekday)
+        limits[str(weekday)] = min(
+            24.0, max(0.0, hours + delta_seconds / 3600)
+        )
+        if not self.settings.set('daily_limits_by_weekday', limits):
+            self.logger.error("Не удалось сохранить дневной лимит")
+            return
+        self.daily_limit_seconds = self._daily_limit_seconds_for_today()
+        if hasattr(self.gui_manager, "daily_limit_spins"):
+            spin = self.gui_manager.daily_limit_spins.get(weekday)
+            if spin is not None:
+                spin.blockSignals(True)
+                spin.setValue(limits[str(weekday)])
+                spin.blockSignals(False)
+        self.update_stats()
 
     def show_main_window(self):
         """Показывает главное окно приложения."""
@@ -1168,9 +1825,10 @@ if __name__ == "__main__":
         sys.exit(1)
     app.setQuitOnLastWindowClosed(False)
     window = GameTimerApp(app)
-    window.show()
+    if not window.settings.get('start_minimized', False):
+        window.show()
     try:
-        rc = app.exec_()
+        rc = app.exec()
     finally:
         try:
             if _mutex_handle:

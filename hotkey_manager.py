@@ -74,6 +74,8 @@ class HotkeyManager:
             hk = (settings.get("hotkeys") or {})
             for key, cb in callbacks.items():
                 combo = hk.get(key)
+                if key == "pause_resume" and not combo:
+                    combo = hk.get("pause")
                 if combo and callable(cb):
                     self.add_hotkey(combo, cb)
                     self.named_hotkeys[key] = combo

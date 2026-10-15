@@ -12,6 +12,7 @@ import sys
 import uuid
 import json
 from logging.handlers import RotatingFileHandler
+from app_paths import get_data_path
 
 # Генерируем session_id при первом импорте
 SESSION_ID = uuid.uuid4().hex[:8]
@@ -32,20 +33,26 @@ class Logger:
         self.logger = logging.getLogger(name)
         self.logger.setLevel(logging.DEBUG)
         
-        # Очищаем существующие обработчики
-        self.logger.handlers = []
+        # Close prior handlers before replacing them; each owns an open log file.
+        for handler in self.logger.handlers[:]:
+            self.logger.removeHandler(handler)
+            handler.close()
         
         # Загружаем конфиг логирования напрямую из settings.json (без импорта SettingsManager)
         cfg = self._load_logging_config()
 
         # Создаем директорию для логов если её нет
         log_dir = cfg.get("log_dir", "logs")
+        if not os.path.isabs(log_dir):
+            log_dir = os.path.join(os.path.dirname(get_data_path("settings.json")), log_dir)
         if not os.path.exists(log_dir):
             os.makedirs(log_dir)
 
         # Определяем путь к лог-файлу
         if log_file is None:
             log_file = os.path.join(log_dir, cfg.get("log_file", "game_timer.log"))
+        elif not os.path.isabs(log_file):
+            log_file = os.path.join(log_dir, os.path.basename(log_file))
 
         # Уровни
         file_level = getattr(logging, str(cfg.get("file_level", "DEBUG")).upper(), logging.DEBUG)
@@ -79,8 +86,7 @@ class Logger:
     def _load_logging_config(self):
         """Читает настройки логирования из settings.json, возвращает dict лог-конфига."""
         try:
-            base_dir = os.path.dirname(os.path.abspath(__file__))
-            settings_path = os.path.join(base_dir, 'settings.json')
+            settings_path = get_data_path('settings.json')
             if os.path.exists(settings_path):
                 with open(settings_path, 'r', encoding='utf-8') as f:
                     data = json.load(f)

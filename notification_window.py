@@ -1,5 +1,4 @@
-from PyQt5 import QtWidgets, QtCore, QtGui
-from win32api import GetSystemMetrics
+from PyQt6 import QtWidgets, QtCore, QtGui
 try:
     import win32gui, win32con
 except Exception:
@@ -9,7 +8,6 @@ import winsound
 import time
 import random
 from logger import Logger
-import os
 
 """
 Файл: notification_window.py
@@ -21,14 +19,16 @@ class NotificationWindow(QtWidgets.QDialog):
     def __init__(self, title="Уведомление", message="", on_close_callback=None):
         super().__init__()
         self.on_close_callback = on_close_callback
-        log_dir = "logs"
-        if not os.path.exists(log_dir):
-            os.makedirs(log_dir)
-        self.logger = Logger("NotificationWindow", "logs/notifications.log")
+        self.logger = Logger("NotificationWindow", "notifications.log")
 
         self.setWindowTitle(title)
-        self.setWindowFlags(self.windowFlags() | QtCore.Qt.FramelessWindowHint | QtCore.Qt.WindowStaysOnTopHint | QtCore.Qt.Tool)
-        self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
+        self.setWindowFlags(
+            self.windowFlags()
+            | QtCore.Qt.WindowType.FramelessWindowHint
+            | QtCore.Qt.WindowType.WindowStaysOnTopHint
+            | QtCore.Qt.WindowType.Tool
+        )
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
 
         # Основной контейнер с тенью
         shadow_widget = QtWidgets.QWidget(self)
@@ -51,8 +51,10 @@ class NotificationWindow(QtWidgets.QDialog):
 
         # Заголовок
         title_label = QtWidgets.QLabel("ЕГОР!")
-        title_label.setFont(QtGui.QFont("Montserrat", 32, QtGui.QFont.Bold))
-        title_label.setAlignment(QtCore.Qt.AlignCenter)
+        title_label.setFont(
+            QtGui.QFont("Montserrat", 32, QtGui.QFont.Weight.Bold)
+        )
+        title_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         title_label.setStyleSheet("color: white;")
         layout.addWidget(title_label)
 
@@ -67,7 +69,7 @@ class NotificationWindow(QtWidgets.QDialog):
         self.message_label = QtWidgets.QLabel(msg)
         self.message_label.setFont(QtGui.QFont("Montserrat", 18))
         self.message_label.setWordWrap(True)
-        self.message_label.setAlignment(QtCore.Qt.AlignCenter)
+        self.message_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self.message_label.setStyleSheet("color: #f5f6fa;")
         layout.addWidget(self.message_label)
 
@@ -76,7 +78,7 @@ class NotificationWindow(QtWidgets.QDialog):
         # Кнопка закрытия
         close_btn = QtWidgets.QPushButton("Закрыть")
         close_btn.setFont(QtGui.QFont("Montserrat", 14))
-        close_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        close_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
         close_btn.setStyleSheet("""
             QPushButton {
                 background-color: #357ABD;
@@ -91,7 +93,9 @@ class NotificationWindow(QtWidgets.QDialog):
             }
         """)
         close_btn.clicked.connect(self.accept)
-        layout.addWidget(close_btn, alignment=QtCore.Qt.AlignCenter)
+        layout.addWidget(
+            close_btn, alignment=QtCore.Qt.AlignmentFlag.AlignCenter
+        )
 
         # Основной layout окна
         outer_layout = QtWidgets.QVBoxLayout(self)
@@ -99,7 +103,7 @@ class NotificationWindow(QtWidgets.QDialog):
         outer_layout.addWidget(shadow_widget)
         self.setLayout(outer_layout)
         self.resize(500, 250)
-        self.setModal(True)
+        self.setModal(False)
 
         # Размещение в правом нижнем углу
         self._move_to_bottom_right()
@@ -108,8 +112,14 @@ class NotificationWindow(QtWidgets.QDialog):
         # Без внутреннего обратного отсчета: управление только через кнопку "Закрыть"
 
     def _move_to_bottom_right(self):
-        screen_geo = QtWidgets.QApplication.desktop().availableGeometry()
-        self.move(screen_geo.width() - self.width() - 20, screen_geo.height() - self.height() - 20)
+        screen = QtWidgets.QApplication.primaryScreen()
+        if screen is None:
+            return
+        screen_geo = screen.availableGeometry()
+        self.move(
+            screen_geo.right() - self.width() - 20,
+            screen_geo.bottom() - self.height() - 20
+        )
 
     def _animate_show(self):
         self.anim = QtCore.QPropertyAnimation(self, b"windowOpacity")

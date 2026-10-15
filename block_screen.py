@@ -5,18 +5,26 @@
 Используется в приложении Game Timer.
 """
 
-from PyQt5 import QtWidgets, QtCore, QtGui
-import sys
-from settings_manager import SettingsManager
+from PyQt6 import QtWidgets, QtCore
 
 class BlockScreen(QtWidgets.QDialog):
-    def __init__(self, settings, countdown_seconds=10, parent=None):
+    def __init__(
+        self,
+        settings,
+        countdown_seconds=10,
+        parent=None,
+        close_game_callback=None,
+    ):
         super().__init__(parent)
         self.settings = settings
+        self.close_game_callback = close_game_callback
         self._seconds_left = max(0, int(countdown_seconds or 0))
         self.setWindowTitle("Блокировка игры")
-        self.setWindowFlags(QtCore.Qt.WindowStaysOnTopHint | QtCore.Qt.FramelessWindowHint)
-        self.setWindowState(QtCore.Qt.WindowFullScreen)
+        self.setWindowFlags(
+            QtCore.Qt.WindowType.WindowStaysOnTopHint
+            | QtCore.Qt.WindowType.FramelessWindowHint
+        )
+        self.setWindowState(QtCore.Qt.WindowState.WindowFullScreen)
         self.setModal(True)
         self.setStyleSheet("background-color: black;")
 
@@ -26,14 +34,32 @@ class BlockScreen(QtWidgets.QDialog):
             self
         )
         self.message_label.setStyleSheet("color: white; font-size: 32px; padding: 40px;")
-        self.message_label.setAlignment(QtCore.Qt.AlignCenter)
+        self.message_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.message_label)
 
         # Видимый обратный отсчет до полной блокировки
         self.countdown_label = QtWidgets.QLabel("", self)
         self.countdown_label.setStyleSheet("color: #cccccc; font-size: 24px; padding: 10px;")
-        self.countdown_label.setAlignment(QtCore.Qt.AlignCenter)
+        self.countdown_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.countdown_label)
+
+        self.close_game_button = QtWidgets.QPushButton("Закрыть игру", self)
+        self.close_game_button.setStyleSheet(
+            "QPushButton{font-size:20px; padding:12px 24px; "
+            "background-color:#b02a37; color:white; border-radius:8px;}"
+            "QPushButton:hover{background-color:#dc3545;}"
+        )
+        self.close_game_button.clicked.connect(self._request_game_close)
+        layout.addWidget(
+            self.close_game_button, alignment=QtCore.Qt.AlignmentFlag.AlignCenter
+        )
+
+        self.close_game_status = QtWidgets.QLabel("", self)
+        self.close_game_status.setStyleSheet(
+            "color: #cccccc; font-size: 16px; padding: 8px;"
+        )
+        self.close_game_status.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.close_game_status)
 
         # Таймер обратного отсчета (только визуальный, окно всё равно остаётся заблокированным)
         self._timer = QtCore.QTimer(self)
@@ -62,3 +88,29 @@ class BlockScreen(QtWidgets.QDialog):
         else:
             self.countdown_label.setText("Блокировка активна")
 
+    def _request_game_close(self):
+        if self.close_game_callback is None:
+            self.close_game_status.setText(
+                "Закрытие игры недоступно. Попросите родителя."
+            )
+            return
+        try:
+            requested_windows = self.close_game_callback()
+        except Exception:
+            self.close_game_status.setText(
+                "Не удалось отправить запрос. Попросите родителя."
+            )
+            return
+
+        if requested_windows is None:
+            self.close_game_status.setText(
+                "Не удалось отправить запрос. Попросите родителя."
+            )
+        elif requested_windows:
+            self.close_game_status.setText(
+                "Запрос отправлен. Подождите, пока игра закроется."
+            )
+        else:
+            self.close_game_status.setText(
+                "Окно игры не найдено. Попросите родителя проверить список игр."
+            )

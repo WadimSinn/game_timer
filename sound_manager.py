@@ -1,6 +1,6 @@
 import os
-from PyQt5.QtCore import QUrl, QObject
-from PyQt5.QtMultimedia import QSoundEffect
+from PyQt6.QtCore import QUrl, QObject
+from PyQt6.QtMultimedia import QSoundEffect
 
 class SoundManager(QObject):
     """

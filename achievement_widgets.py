@@ -6,7 +6,7 @@
 В будущем легко расширяется добавлением иконок/картинок.
 """
 from typing import Optional
-from PyQt5 import QtWidgets, QtCore, QtGui
+from PyQt6 import QtWidgets
 
 
 class AchievementCard(QtWidgets.QGroupBox):
@@ -16,7 +16,10 @@ class AchievementCard(QtWidgets.QGroupBox):
 
     def __init__(self, title: str, description: str, progress: int, total: int, completed: bool, parent: Optional[QtWidgets.QWidget] = None):
         super().__init__(title, parent)
-        self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Minimum)
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Minimum
+        )
 
         v = QtWidgets.QVBoxLayout(self)
         v.addWidget(QtWidgets.QLabel(description))
@@ -64,6 +67,8 @@ class AchievementsWindow(QtWidgets.QDialog):
             pass
 
         # Кнопка закрытия
-        btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
+        btns = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Close
+        )
         btns.rejected.connect(self.reject)
         layout.addWidget(btns)

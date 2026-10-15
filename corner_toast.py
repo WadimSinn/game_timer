@@ -1,4 +1,4 @@
-from PyQt5 import QtWidgets, QtCore, QtGui
+from PyQt6 import QtWidgets, QtCore
 
 class CornerToast(QtWidgets.QWidget):
     """
@@ -6,17 +6,25 @@ class CornerToast(QtWidgets.QWidget):
     Показывает произвольный текст, например обратный отсчёт до окончания времени.
     """
     def __init__(self, parent=None):
-        super().__init__(parent, flags=QtCore.Qt.Tool | QtCore.Qt.FramelessWindowHint | QtCore.Qt.WindowStaysOnTopHint)
+        super().__init__(
+            parent,
+            flags=QtCore.Qt.WindowType.Tool
+            | QtCore.Qt.WindowType.FramelessWindowHint
+            | QtCore.Qt.WindowType.WindowStaysOnTopHint
+        )
         # Не перехватывать клики мыши
-        self.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
-        self.setAttribute(QtCore.Qt.WA_ShowWithoutActivating, True)
-        self.setWindowModality(QtCore.Qt.NonModal)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setWindowModality(QtCore.Qt.WindowModality.NonModal)
 
         self._padding = 12
         self._radius = 10
 
         self.label = QtWidgets.QLabel(self)
-        self.label.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+        self.label.setAlignment(
+            QtCore.Qt.AlignmentFlag.AlignLeft
+            | QtCore.Qt.AlignmentFlag.AlignVCenter
+        )
         font = self.label.font()
         font.setPointSize(11)
         font.setBold(True)

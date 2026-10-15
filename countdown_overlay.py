@@ -1,4 +1,4 @@
-from PyQt5 import QtWidgets, QtCore, QtGui
+from PyQt6 import QtWidgets, QtCore, QtGui
 try:
     import win32gui, win32con
 except Exception:
@@ -16,17 +16,23 @@ class CountdownOverlay(QtWidgets.QWidget):
         super().__init__(parent)
         # Без рамки, поверх всех окон, прозрачный фон, не фокусируемый
         self.setWindowFlags(
-            QtCore.Qt.FramelessWindowHint |
-            QtCore.Qt.WindowStaysOnTopHint |
-            QtCore.Qt.Tool  # не отображать в таскбаре
+            QtCore.Qt.WindowType.FramelessWindowHint
+            | QtCore.Qt.WindowType.WindowStaysOnTopHint
+            | QtCore.Qt.WindowType.Tool
         )
-        self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
         # Прозрачен для ввода (клики проходят сквозь)
-        if hasattr(QtCore.Qt, 'WindowTransparentForInput'):
-            self.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
-            self.setWindowFlag(QtCore.Qt.WindowTransparentForInput, True)
+        if hasattr(QtCore.Qt.WindowType, 'WindowTransparentForInput'):
+            self.setAttribute(
+                QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
+            )
+            self.setWindowFlag(
+                QtCore.Qt.WindowType.WindowTransparentForInput, True
+            )
         else:
-            self.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
+            self.setAttribute(
+                QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
+            )
 
         self._seconds_left = 0
         self._timer = QtCore.QTimer(self)
@@ -36,9 +42,11 @@ class CountdownOverlay(QtWidgets.QWidget):
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
         self.label = QtWidgets.QLabel("")
-        font = QtGui.QFont("Montserrat", 72, QtGui.QFont.Black)
+        font = QtGui.QFont(
+            "Montserrat", 72, QtGui.QFont.Weight.Black
+        )
         self.label.setFont(font)
-        self.label.setAlignment(QtCore.Qt.AlignCenter)
+        self.label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self.label.setStyleSheet("color: white;")
 
         # Тень под текст
