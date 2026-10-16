@@ -494,6 +494,7 @@ class GameTimerApp(QtWidgets.QMainWindow):
         )
         self._last_session_progress_save_ts = time.monotonic()
         self._session_progress_dirty = False
+        self._usage_account_remainder_seconds = 0.0
         self.autostart_manager = AutostartManager()
         if not self.autostart_manager.set_autostart(
             self.settings.get('autostart', False) is True
@@ -637,7 +638,7 @@ class GameTimerApp(QtWidgets.QMainWindow):
                 self.gui_manager.set_rest_info("", False)
         except Exception:
             pass
-        # 5) При обнаружении игры — предложить запустить таймер (если не идёт и нет перерыва)
+        # 5) При обнаружении игры автоматически запустить таймер и показать уведомление
         try:
             if self.settings.get('auto_start_on_game_detect', True):
                 any_game = self.process_manager.is_any_monitored_process_running()
@@ -646,16 +647,23 @@ class GameTimerApp(QtWidgets.QMainWindow):
                 # - таймер уже истёк (идёт grace или после него),
                 # - уже показано уведомление о конце времени.
                 suppress_auto_prompt = self.timer_manager.is_expired() or hasattr(self, 'notification_shown')
-                if not in_rest and any_game and not timer_running and not suppress_auto_prompt:
+                if (
+                    not in_rest
+                    and any_game
+                    and not timer_running
+                    and not suppress_auto_prompt
+                    and time.time() >= self._next_auto_prompt_ts
+                ):
                     # Запланировать отложенный показ, если ещё не запланирован
                     if not self._auto_prompt_pending:
-                        delay_sec = int(self.settings.get('auto_prompt_initial_delay_sec', 20) or 20)
                         self._auto_prompt_pending = True
-                        QtCore.QTimer.singleShot(max(0, delay_sec) * 1000, self._auto_prompt_after_delay)
+                        QtCore.QTimer.singleShot(0, self._auto_prompt_after_delay)
                 else:
                     # Условие не выполняется — сбросим ожидание
                     self._auto_prompt_pending = False
                     self._auto_prompt_retries = 0
+                    if not any_game:
+                        self._next_auto_prompt_ts = 0.0
         except Exception:
             pass
 
@@ -753,10 +761,7 @@ class GameTimerApp(QtWidgets.QMainWindow):
             pass
 
     def _maybe_prompt_auto_start(self):
-        """Показывает неблокирующее окно 'Начать таймер?' с повторами и таймаутом.
-        Улучшено для детского UX: крупные кнопки, эмодзи, центрирование, логирование путей закрытия.
-        Есть защита от флапа условий в первые 3 секунды.
-        """
+        """Starts the automatic timer and shows a one-button acknowledgement."""
         try:
             # Подавление авто-диалога во время/после истечения таймера и в период grace
             if self.timer_manager.is_expired() or hasattr(self, 'notification_shown'):
@@ -773,28 +778,26 @@ class GameTimerApp(QtWidgets.QMainWindow):
                     pass
                 return
 
-            text = self.settings.get('auto_prompt_text', 'Обнаружена игра. Начать таймер?')
+            if not self._start_auto_timer():
+                return
+
+            text = self.settings.get(
+                'auto_prompt_text',
+                'Игра обнаружена. Время уже учитывается — не забудь про перерыв.',
+            )
             timeout_sec = int(self.settings.get('auto_prompt_dialog_timeout_sec', 8) or 8)
-            timeout_sec = max(3, timeout_sec)  # Минимум 3 секунды показа
-            retry_sec = int(self.settings.get('auto_prompt_retry_seconds', 30) or 30)
-            max_retries = int(self.settings.get('auto_prompt_max_retries', 3) or 3)
-            snooze_min = int(self.settings.get('auto_prompt_snooze_minutes', 5) or 5)
+            timeout_sec = max(3, timeout_sec)
 
             box = QtWidgets.QMessageBox(self)
             self._auto_prompt_box = box
             self._auto_prompt_open = True
-            box.setWindowTitle('⏱️ Таймер')
+            box.setWindowTitle('⏱️ Игра обнаружена')
             box.setText(f"🎮 {text}")
-            box.setIcon(QtWidgets.QMessageBox.Icon.Question)
+            box.setIcon(QtWidgets.QMessageBox.Icon.Information)
             box.setStandardButtons(QtWidgets.QMessageBox.StandardButton.NoButton)
-            yes_btn = box.addButton(QtWidgets.QMessageBox.StandardButton.Yes)
-            no_btn = box.addButton(QtWidgets.QMessageBox.StandardButton.No)
-            try:
-                yes_btn.setText('Да, начать! 🚀')
-                no_btn.setText('Нет, позже')
-            except Exception:
-                pass
-            box.setDefaultButton(yes_btn)
+            acknowledge_btn = box.addButton(
+                'Понятно', QtWidgets.QMessageBox.ButtonRole.AcceptRole
+            )
             box.setWindowFlag(QtCore.Qt.WindowType.WindowStaysOnTopHint, True)
             box.setWindowFlag(QtCore.Qt.WindowType.Tool, True)
             box.setWindowModality(QtCore.Qt.WindowModality.NonModal)
@@ -804,63 +807,18 @@ class GameTimerApp(QtWidgets.QMainWindow):
                     "QLabel{font-size:18px;} "
                     "QPushButton{font-size:18px; padding:10px 18px; border-radius:8px;}"
                 )
-                yes_btn.setStyleSheet(
+                acknowledge_btn.setStyleSheet(
                     "QPushButton{background-color:#28a745; color:white;}"
                     "QPushButton:hover{background-color:#2ecc71;}"
-                )
-                no_btn.setStyleSheet(
-                    "QPushButton{background-color:#6c757d; color:white;}"
-                    "QPushButton:hover{background-color:#95a5a6;}"
                 )
             except Exception:
                 pass
 
-            shown_at = time.time()
-            self.logger.info("Auto-prompt: show dialog (retries=%s)" % self._auto_prompt_retries)
-
-            def on_yes():
-                try:
-                    mode = str(self.settings.get('auto_start_mode', 'countup') or 'countup')
-                    if mode == 'countdown':
-                        secs = int(self.settings.get('auto_countdown_seconds', 3600) or 3600)
-                        secs = max(0, secs)
-                        started = self.timer_manager.start_timer(secs, 'countdown')
-                    else:
-                        started = self.timer_manager.start_timer(0, 'countup')
-                    if not started:
-                        self.tray_manager.show_message(
-                            "Таймер",
-                            "Автоматическая длительность должна быть больше нуля."
-                        )
-                        return
-                    self.achievement_manager.on_timer_start()
-                    self.manual_start = False
-                    self._expire_grace_used = False
-                    self._block_dismissed_until_game_exit = False
-                    self._auto_prompt_retries = 0
-                    self.logger.info("Auto-prompt: clicked YES -> timer started")
-                finally:
-                    self._auto_prompt_open = False
-                    self._auto_prompt_box = None
-                    box.close()
-
-            def on_no():
-                try:
-                    if self._auto_prompt_retries < max_retries:
-                        self._auto_prompt_retries += 1
-                        self._auto_prompt_pending = True
-                        self.logger.info("Auto-prompt: clicked NO -> schedule retry in %ss" % retry_sec)
-                        QtCore.QTimer.singleShot(max(0, retry_sec) * 1000, self._auto_prompt_after_delay)
-                    else:
-                        self.logger.info("Auto-prompt: clicked NO -> snooze %s min" % snooze_min)
-                        self._next_auto_prompt_ts = time.time() + snooze_min * 60
-                finally:
-                    self._auto_prompt_open = False
-                    self._auto_prompt_box = None
-                    box.close()
-
-            yes_btn.clicked.connect(on_yes)
-            no_btn.clicked.connect(on_no)
+            self.logger.info("Auto-start: timer started; showing acknowledgement")
+            acknowledge_btn.clicked.connect(box.accept)
+            box.finished.connect(
+                lambda _result, prompt=box: self._clear_auto_prompt(prompt)
+            )
             box.show()
             box.raise_()
             box.activateWindow()
@@ -899,45 +857,64 @@ class GameTimerApp(QtWidgets.QMainWindow):
             except Exception:
                 pass
 
-            # Таймаут авто-повтора при отсутствии ответа
+            # Закрываем уведомление автоматически; таймер продолжает работать.
             def on_timeout():
                 try:
                     if not self._auto_prompt_open or not box.isVisible():
                         return
-                    # Проверим актуальность условий (с защитой от флапа первые 3с)
-                    if (time.time() - shown_at) >= 3:
-                        if self.is_in_rest():
-                            self.logger.info("Auto-prompt timeout: conditions invalidated -> rest active")
-                            self._auto_prompt_retries = 0
-                            return
-                        if not self.process_manager.is_any_monitored_process_running():
-                            self.logger.info("Auto-prompt timeout: conditions invalidated -> game closed")
-                            self._auto_prompt_retries = 0
-                            return
-                        if self.timer_manager.is_running():
-                            self.logger.info("Auto-prompt timeout: conditions invalidated -> timer already running")
-                            self._auto_prompt_retries = 0
-                            return
-                    if self._auto_prompt_retries < max_retries:
-                        self._auto_prompt_retries += 1
-                        self._auto_prompt_open = False
-                        self._auto_prompt_box = None
-                        box.close()
-                        self._auto_prompt_pending = True
-                        self.logger.info("Auto-prompt timeout: schedule retry in %ss (retry #%s)" % (retry_sec, self._auto_prompt_retries))
-                        QtCore.QTimer.singleShot(max(0, retry_sec) * 1000, self._auto_prompt_after_delay)
+                    if (
+                        self.is_in_rest()
+                        or not self.process_manager.is_any_monitored_process_running()
+                    ):
+                        self.logger.info(
+                            "Auto-start acknowledgement closed because no game is active"
+                        )
                     else:
-                        self._auto_prompt_open = False
-                        self._auto_prompt_box = None
-                        box.close()
-                        self.logger.info("Auto-prompt timeout: snooze %s min" % snooze_min)
-                        self._next_auto_prompt_ts = time.time() + snooze_min * 60
+                        self.logger.info("Auto-start acknowledgement timed out")
+                    box.close()
                 except Exception:
                     pass
 
             QtCore.QTimer.singleShot(max(1, timeout_sec) * 1000, on_timeout)
         except Exception as e:
             self.logger.error(f"Ошибка авто-приглашения к запуску таймера: {e}")
+
+    def _start_auto_timer(self):
+        """Starts the configured timer without waiting for acknowledgement."""
+        try:
+            mode = str(
+                self.settings.get('auto_start_mode', 'countup') or 'countup'
+            ).lower()
+            if mode == 'countdown':
+                seconds = max(
+                    0,
+                    int(self.settings.get('auto_countdown_seconds', 3600) or 0),
+                )
+                started = self.timer_manager.start_timer(seconds, 'countdown')
+            else:
+                started = self.timer_manager.start_timer(0, 'countup')
+            if not started:
+                self.tray_manager.show_message(
+                    "Таймер",
+                    "Не удалось запустить автоматический таймер. "
+                    "Проверьте его длительность в настройках.",
+                )
+                return False
+
+            self.achievement_manager.on_timer_start()
+            self.manual_start = False
+            self._expire_grace_used = False
+            self._block_dismissed_until_game_exit = False
+            self._auto_prompt_retries = 0
+            return True
+        except Exception as e:
+            self.logger.error(f"Не удалось запустить автоматический таймер: {e}")
+            return False
+
+    def _clear_auto_prompt(self, prompt):
+        if self._auto_prompt_box is prompt:
+            self._auto_prompt_open = False
+            self._auto_prompt_box = None
 
     def _format_mmss(self, total_seconds: int) -> str:
         total_seconds = max(0, int(total_seconds))
@@ -1119,7 +1096,6 @@ class GameTimerApp(QtWidgets.QMainWindow):
             force_refresh=warning_active
         )
         timer_running = self.timer_manager.is_running()
-        is_countup = self.timer_manager.get_mode() == 'countup'
 
         if not any_game_running:
             self._cancel_game_warning()
@@ -1127,17 +1103,22 @@ class GameTimerApp(QtWidgets.QMainWindow):
                 self.logger.info("Игра закрыта — окно блокировки снято.")
             self._block_dismissed_until_game_exit = False
             self._expire_grace_used = False
-            if (
-                timer_running
-                and is_countup
-                and not self.manual_start
-            ):
+            if timer_running and not self.manual_start:
                 self.timer_manager.pause_timer()
-                self.logger.info("Все игры закрыты, авто-таймер на паузе.")
+                self.logger.info("Все игры закрыты, автоматический таймер на паузе.")
             return
 
         if self._block_dismissed_until_game_exit:
             return
+
+        if (
+            timer_running
+            and not self.manual_start
+            and self.timer_manager.is_paused()
+            and not self.is_in_rest()
+        ):
+            self.timer_manager.toggle_pause()
+            self.logger.info("Игра обнаружена — автоматический таймер продолжен.")
         
         # Проверяем, не истек ли таймер
         timer_expired = self.timer_manager.is_expired()
@@ -1355,15 +1336,8 @@ class GameTimerApp(QtWidgets.QMainWindow):
         """Accounts time only while a monitored game's window is in the foreground."""
         try:
             now = time.monotonic()
-            elapsed = now - self._last_usage_account_ts
+            elapsed = max(0.0, now - self._last_usage_account_ts)
             self._last_usage_account_ts = now
-            max_interval = max(
-                1,
-                int(self.settings.get('periodic_tasks_interval_ms', 1000) / 1000)
-            )
-            duration = min(max_interval, int(elapsed))
-            if duration <= 0:
-                return
             active = set(self.process_manager.get_active_processes())
             monitored = {
                 os.path.basename(name.strip()).lower()
@@ -1375,6 +1349,15 @@ class GameTimerApp(QtWidgets.QMainWindow):
             )
             foreground = os.path.basename(foreground).lower()
             if foreground not in active or foreground not in monitored:
+                self._usage_account_remainder_seconds = 0.0
+                return
+            total_elapsed = (
+                elapsed
+                + getattr(self, '_usage_account_remainder_seconds', 0.0)
+            )
+            duration = int(total_elapsed)
+            self._usage_account_remainder_seconds = total_elapsed - duration
+            if duration <= 0:
                 return
             self.process_manager.record_active_processes({foreground}, duration)
             self._account_play_session({foreground}, duration)

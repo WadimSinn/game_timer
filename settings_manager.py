@@ -107,8 +107,8 @@ class SettingsManager:
             "auto_start_on_game_detect": True,
             "auto_start_mode": "countup",  # 'countup' или 'countdown'
             "auto_countdown_seconds": 3600,  # если выбран countdown
-            "auto_prompt_text": "Обнаружена игра. Начать таймер?",
-            "auto_prompt_snooze_minutes": 5,
+            "auto_prompt_text": "Игра обнаружена. Время уже учитывается — не забудь про перерыв.",
+            "auto_prompt_dialog_timeout_sec": 8,
             # Подписи к ключевым настройкам (для удобства редактирования в settings.json)
             "settings_descriptions": {
                 "mode": "Режим работы таймера: 'timer' — отсчет вниз, может быть и другие режимы при расширении",
@@ -137,11 +137,11 @@ class SettingsManager:
                 "block_until_next_day_on_limit": "Если true — при достижении дневного лимита блокируем до следующего дня",
                 "enforce_cooldown_between_sessions": "Если true — после принудительной блокировки включается перерыв (cooldown)",
                 "rest_until": "Техническое поле: время окончания текущего перерыва в ISO-формате. Лучше не менять вручную",
-                "auto_start_on_game_detect": "Если true — при запуске отслеживаемой игры будет показан вопрос и можно автоматически запустить таймер",
+                "auto_start_on_game_detect": "Если true — при запуске отслеживаемой игры таймер включается автоматически",
                 "auto_start_mode": "Режим авто-таймера: 'countup' — прямой отсчет, 'countdown' — обратный",
                 "auto_countdown_seconds": "Длительность (сек), если выбран режим 'countdown' (по умолчанию 3600 = 1 час)",
-                "auto_prompt_text": "Текст вопроса в окне при обнаружении игры",
-                "auto_prompt_snooze_minutes": "Через сколько минут повторно спрашивать, если нажали 'Нет' или закрыли окно"
+                "auto_prompt_text": "Текст уведомления при обнаружении игры",
+                "auto_prompt_dialog_timeout_sec": "Через сколько секунд автоматически закрыть уведомление об обнаружении игры"
             }
         }
         self.load()
@@ -172,6 +172,12 @@ class SettingsManager:
                 deepcopy(self.default_settings)
             )
         self._import_legacy_settings()
+        if self.settings.get("auto_prompt_text") == "Обнаружена игра. Начать таймер?":
+            self.settings["auto_prompt_text"] = self.default_settings[
+                "auto_prompt_text"
+            ]
+            if not self.save():
+                self.logger.error("Could not update the old auto-start prompt text")
 
     def _import_legacy_settings(self):
         """Merges older timer_settings.json values without overriding current settings."""
